@@ -40,9 +40,6 @@ jobs:
           echo "Repository contents:"
           ls -la
 
-          echo "DOTATI 2027 contents:"
-          ls -la dotati2027
-
 
       - name: Run DOTATI 2027 cross-reading
         env:
@@ -50,4 +47,4 @@ jobs:
           SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
         run: |
           echo "Starting DOTATI 2027 pipeline"
-          python dotati2027/main.py
+          python main.py
