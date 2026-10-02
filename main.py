@@ -23,8 +23,17 @@ from supabase import Client, create_client
 # CONFIGURAZIONE
 # ============================================================
 SUPABASE_URL = os.environ["SUPABASE_URL"]
-SUPABASE_SERVICE_ROLE_KEY = os.environ["SUPABASE_SERVICE_ROLE_KEY"]
-SOURCE_BUCKET = os.getenv("SOURCE_BUCKET", "sources")
+# ============================================================
+# CONFIGURAZIONE
+# ============================================================
+SUPABASE_URL = os.environ.get("SUPABASE_URL", "").strip()
+SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+
+if not SUPABASE_URL:
+    raise ValueError("La variabile d'ambiente SUPABASE_URL è vuota o non definita nei Secrets di GitHub!")
+
+if not SUPABASE_SERVICE_ROLE_KEY:
+    raise ValueError("La variabile d'ambiente SUPABASE_SERVICE_ROLE_KEY è vuota o non definita nei Secrets di GitHub!")
 ICCD_SPARQL_ENDPOINT = os.getenv(
     "ICCD_SPARQL_ENDPOINT",
     "https://dati.cultura.gov.it/sparql",
