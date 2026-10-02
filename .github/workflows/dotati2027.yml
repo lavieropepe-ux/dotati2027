@@ -32,7 +32,7 @@ jobs:
 
       - name: Install DOTATI 2027 dependencies
         run: |
-          pip install -r dotati2027/requirements.txt
+          pip install -r requirements.txt
 
 
       - name: Verify DOTATI 2027 files
