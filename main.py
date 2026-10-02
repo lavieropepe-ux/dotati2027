@@ -8,6 +8,7 @@ import sys
 import time
 from collections import defaultdict
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, Iterable
 from urllib.parse import quote
 
@@ -20,24 +21,15 @@ from supabase import Client, create_client
 
 
 # ============================================================
-# CONFIGURAZIONE
-# ============================================================
-SUPABASE_URL = os.environ["SUPABASE_URL"]
-# ============================================================
-# CONFIGURAZIONE
+# CONFIGURAZIONE E VARIABILI D'AMBIENTE
 # ============================================================
 SUPABASE_URL = os.environ.get("SUPABASE_URL", "").strip()
 SUPABASE_SERVICE_ROLE_KEY = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
-
-if not SUPABASE_URL:
-    raise ValueError("La variabile d'ambiente SUPABASE_URL è vuota o non definita nei Secrets di GitHub!")
-
-if not SUPABASE_SERVICE_ROLE_KEY:
-    raise ValueError("La variabile d'ambiente SUPABASE_SERVICE_ROLE_KEY è vuota o non definita nei Secrets di GitHub!")
+SOURCE_BUCKET = os.getenv("SOURCE_BUCKET", "sources").strip()
 ICCD_SPARQL_ENDPOINT = os.getenv(
     "ICCD_SPARQL_ENDPOINT",
     "https://dati.cultura.gov.it/sparql",
-)
+).strip()
 
 TABLE_DOCUMENTS = "d27_documents"
 TABLE_PAGES = "d27_document_pages"
@@ -52,8 +44,7 @@ MAX_SENTENCE_CHARS = 900
 ICCD_MIN_SCORE = 45.0
 ICCD_MAX_RESULTS = 8
 
-# Termini-segnale generali: NON sono un vocabolario finale di San Leucio.
-# Servono solo per individuare frasi potenzialmente storico-architettoniche.
+# Termini-segnale generali per individuare frasi storico-architettoniche.
 ARCHITECTURAL_HEADS = [
     "casino", "palazzo", "belvedere", "filanda", "setificio", "chiesa",
     "quartiere", "quartieri", "fabbricato", "edificio", "corpo", "ala",
@@ -147,18 +138,30 @@ def local_name(uri: str | None) -> str | None:
 
 
 def supabase_client() -> Client:
-    return create_client(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY)
+    url = SUPABASE_URL
+    key = SUPABASE_SERVICE_ROLE_KEY
+
+    # Debug e controlli di validità
+    print(f"[DEBUG] SUPABASE_URL estratto -> '{url}' (lunghezza: {len(url)})")
+    
+    if not url:
+        raise ValueError("ERRORE: La variabile SUPABASE_URL è vuota o non trovata.")
+    if not (url.startswith("http://") or url.startswith("https://")):
+        raise ValueError(f"ERRORE: L'URL di Supabase non è valido -> '{url}'. Deve iniziare con 'https://'")
+    if not key:
+        raise ValueError("ERRORE: La variabile SUPABASE_SERVICE_ROLE_KEY è vuota o non trovata.")
+
+    return create_client(url, key)
 
 
 def iter_storage_files(sb: Client, prefix: str = "") -> Iterable[str]:
-    """Lista ricorsivamente i file del bucket. Il prototipo usa soprattutto PDF/TXT."""
+    """Lista ricorsivamente i file del bucket."""
     items = sb.storage.from_(SOURCE_BUCKET).list(prefix)
     for item in items:
         name = item.get("name")
         if not name:
             continue
         path = f"{prefix}/{name}".strip("/")
-        # Nei risultati Storage i file hanno normalmente un id; le cartelle no.
         if item.get("id"):
             yield path
         else:
@@ -202,7 +205,6 @@ def register_and_extract_documents(sb: Client) -> None:
                     "processing_status": "processing",
                     "processing_error": None,
                 }).eq("id", doc_id).execute()
-                # Se la fonte è stata sostituita, rigeneriamo le pagine.
                 sb.table(TABLE_PAGES).delete().eq("document_id", doc_id).execute()
             else:
                 inserted = sb.table(TABLE_DOCUMENTS).insert({
@@ -238,7 +240,6 @@ def register_and_extract_documents(sb: Client) -> None:
                 else:
                     sb.table(TABLE_PAGES).insert(page_payload).execute()
 
-            from datetime import datetime, timezone
             sb.table(TABLE_DOCUMENTS).update({
                 "processing_status": "processed",
                 "processing_error": None,
@@ -282,7 +283,6 @@ def extract_file_pages(file_name: str, raw: bytes) -> list[dict[str, Any]]:
             })
             continue
 
-        # Fallback OCR locale: nessuna API esterna.
         pix = page.get_pixmap(matrix=fitz.Matrix(2.0, 2.0), alpha=False)
         image = Image.open(io.BytesIO(pix.tobytes("png")))
         ocr = clean_space(pytesseract.image_to_string(image, lang="ita"))
@@ -307,7 +307,6 @@ def split_sentences(text: str) -> list[str]:
 
 def classify_evidence_type(sentence: str) -> str | None:
     low = sentence.lower()
-    # Priorità: trasformazione > costruzione > funzione > relazione > tutela.
     for category in [
         "transformation",
         "construction",
@@ -330,14 +329,12 @@ def extract_subject(sentence: str) -> str | None:
     candidates: list[str] = []
     for m in matches:
         candidate = clean_space(m.group(0)).strip(" ,.;:()[]")
-        # Evita etichette troppo generiche quando possibile.
         if candidate:
             candidates.append(candidate)
 
     if not candidates:
         return None
 
-    # Preferiamo la denominazione più informativa (più token, poi più lunga).
     candidates.sort(key=lambda x: (len(normalize(x).split()), len(x)), reverse=True)
     return candidates[0]
 
@@ -396,7 +393,6 @@ def canonical_subject(subject: str, canonicals: list[str]) -> str:
             best_score = score
 
     if best is not None and best_score >= 88.0:
-        # Manteniamo la forma più informativa come canonica.
         if len(normalize(subject).split()) > len(normalize(best).split()):
             idx = canonicals.index(best)
             canonicals[idx] = subject
@@ -424,7 +420,6 @@ def build_cross_reading_evidence(sb: Client) -> None:
     touched_evidence_ids: set[str] = set()
 
     for (_, evidence_type, _), group in grouped.items():
-        # Canonica più informativa all'interno del gruppo.
         subject = max((f.subject for f in group), key=lambda x: (len(normalize(x).split()), len(x)))
         years = sorted({y for f in group for y in f.years})
         start_year = years[0] if years else None
@@ -434,7 +429,6 @@ def build_cross_reading_evidence(sb: Client) -> None:
         document_count = len(documents)
         cross_source = document_count >= 2
 
-        # Scegliamo come excerpt rappresentativo prima una frase datata, poi la più concisa.
         representative = sorted(
             group,
             key=lambda f: (0 if f.years else 1, len(f.excerpt))
@@ -517,7 +511,6 @@ def make_query_terms(subject: str) -> list[str]:
     terms = [subject]
 
     tokens = [t for t in normalize(subject).split() if len(t) >= 4]
-    # Aggiungiamo al massimo due termini distintivi per recuperare varianti di denominazione.
     for token in sorted(tokens, key=len, reverse=True)[:2]:
         if token.lower() not in {x.lower() for x in terms}:
             terms.append(token)
@@ -609,7 +602,6 @@ def lookup_iccd_for_validated_evidence(sb: Client) -> None:
         if not subject:
             continue
 
-        # Non rifacciamo il lookup se esiste già almeno un mapping per questa evidence.
         existing = (
             sb.table(TABLE_ICCD)
             .select("id")
@@ -682,7 +674,7 @@ def lookup_iccd_for_validated_evidence(sb: Client) -> None:
 
 
 # ============================================================
-# 4. RIEPILOGO
+# 4. RIEPILOGO E MAIN
 # ============================================================
 def print_summary(sb: Client) -> None:
     print("[4/4] Riepilogo")
